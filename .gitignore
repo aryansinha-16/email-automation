@@ -1,0 +1,14 @@
+service_account.json
+.env
+__pycache__/
+*.pyc
+
+# IDE / local clutter
+.idea/
+
+# Local-only helper that EMBEDS the OAuth client secret — never publish
+get_token_for_sonal.py
+
+# Local scratch / verification artifacts
+_out.txt
+_verify_quote.py
