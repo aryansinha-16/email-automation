@@ -31,7 +31,7 @@ import time
 import traceback
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.utils import parsedate_to_datetime, parseaddr
+from email.utils import parsedate_to_datetime, parseaddr, getaddresses, formataddr
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
@@ -117,6 +117,45 @@ def parse_sender(from_header):
     if "<" in from_header and ">" in from_header:
         return from_header.split("<", 1)[1].split(">", 1)[0].strip().lower()
     return from_header.strip().lower()
+
+
+def build_reply_all_recipients(from_header, to_header, cc_header, me_email):
+    """Compute Reply-All To/Cc lists from the original message's headers.
+
+    Mirrors what Gmail's "Reply All" does:
+      - To  = original sender + everyone on the original To
+      - Cc  = everyone on the original Cc
+    Excludes the mailbox owner (`me_email`) from both (never reply to ourselves),
+    de-dupes by lowercased address (keeping first-seen display name), and keeps
+    an address out of Cc if it's already in To. Returns (to_str, cc_str) as
+    RFC-2822 address-list strings ("" if a list is empty).
+    """
+    me = (me_email or "").strip().lower()
+
+    def collect(*headers):
+        pairs = getaddresses([h for h in headers if h])  # [(name, addr), ...]
+        out = []
+        for name, addr in pairs:
+            a = addr.strip()
+            if a:
+                out.append((name.strip(), a))
+        return out
+
+    seen = set()  # lowercased addresses already placed (in To or Cc)
+
+    def dedupe(pairs):
+        result = []
+        for name, addr in pairs:
+            low = addr.lower()
+            if low == me or low in seen:
+                continue
+            seen.add(low)
+            result.append(formataddr((name, addr)) if name else addr)
+        return result
+
+    to_list = dedupe(collect(from_header, to_header))  # sender first, then To
+    cc_list = dedupe(collect(cc_header))               # Cc, minus anything already in To
+    return ", ".join(to_list), ", ".join(cc_list)
 
 
 def is_allowed(sender_email):
@@ -367,8 +406,8 @@ def _html_quote(reply_text, from_header, date_header, original_body):
 
 
 def build_reply_raw(
-    to_email, subject, in_reply_to, references, reply_text,
-    from_header="", date_header="", original_body="",
+    to_addrs, subject, in_reply_to, references, reply_text,
+    from_header="", date_header="", original_body="", cc_addrs="",
 ):
     """Build a base64url raw MIME reply that threads correctly, as a
     multipart/alternative: a text/plain part ('>'-quoted) AND a text/html part
@@ -386,7 +425,9 @@ def build_reply_raw(
     html_body = _html_quote(reply_text, from_header, date_header, original_body)
 
     msg = MIMEMultipart("alternative")
-    msg["To"] = to_email
+    msg["To"] = to_addrs
+    if cc_addrs:
+        msg["Cc"] = cc_addrs
     # From is omitted: Gmail sends as the authenticated account automatically.
     msg["Subject"] = reply_subject
     if in_reply_to:
@@ -400,7 +441,7 @@ def build_reply_raw(
 
 # ---- main loop ------------------------------------------------------------
 
-def process_once(service, handled_label_id):
+def process_once(service, handled_label_id, me_email=""):
     """Find inbox mail we haven't handled yet, reply if it's a buy request."""
     # Track ONLY our own label — not read/unread. This way the bot still fires
     # even if you (or your phone) opened the email before the poll caught it.
@@ -433,6 +474,8 @@ def process_once(service, handled_label_id):
         message_id = header(headers, "Message-ID")
         references = header(headers, "References")
         from_header = header(headers, "From")  # full "Name <email>" for the quote line
+        to_header = header(headers, "To")
+        cc_header = header(headers, "Cc")
         date_header = header(headers, "Date")
         body = extract_body(msg["payload"])
 
@@ -449,12 +492,23 @@ def process_once(service, handled_label_id):
             ).execute()
             continue
 
-        print(f"[{sender}] {subject!r} -> YES -> {APPROVAL_REPLY!r}", flush=True)
+        # Reply-All: sender + original To on the To line, original Cc on Cc,
+        # with the mailbox owner removed so we never reply to ourselves.
+        to_addrs, cc_addrs = build_reply_all_recipients(
+            from_header, to_header, cc_header, me_email
+        )
+
+        print(
+            f"[{sender}] {subject!r} -> YES -> {APPROVAL_REPLY!r} "
+            f"| To: {to_addrs} | Cc: {cc_addrs}",
+            flush=True,
+        )
 
         if not DRY_RUN:
             raw = build_reply_raw(
-                sender, subject, message_id, references, APPROVAL_REPLY,
-                from_header=from_header, date_header=date_header, original_body=body,
+                to_addrs, subject, message_id, references, APPROVAL_REPLY,
+                from_header=from_header, date_header=date_header,
+                original_body=body, cc_addrs=cc_addrs,
             )
             service.users().messages().send(
                 userId="me",
@@ -484,7 +538,7 @@ def main():
 
     while True:
         try:
-            process_once(service, handled_label_id)
+            process_once(service, handled_label_id, me_email=me)
         except Exception:
             print("ERROR in poll loop:", flush=True)
             traceback.print_exc()
