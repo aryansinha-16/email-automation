@@ -6,8 +6,9 @@ __pycache__/
 # IDE / local clutter
 .idea/
 
-# Local-only helper that EMBEDS the OAuth client secret — never publish
+# Local-only helpers that EMBED the OAuth client secret — never publish
 get_token_for_sonal.py
+get_token_for.py
 
 # Local scratch / verification artifacts
 _out.txt

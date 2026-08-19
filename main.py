@@ -17,7 +17,7 @@ Required env vars:
   GROQ_API_KEY                 - Groq API key
 Optional:
   POLL_SECONDS                 - how often to check (default 60)
-  GROQ_MODEL                   - default "llama-3.3-70b-versatile"
+  GROQ_MODEL                   - default "openai/gpt-oss-20b"
   HANDLED_LABEL                - Gmail label applied after replying (default "AutoReplied")
   DRY_RUN                      - "1" to log replies instead of sending
 """
@@ -56,7 +56,7 @@ ALLOWED_SENDERS = [
     s.strip().lower() for s in os.environ["ALLOWED_SENDERS"].split(",") if s.strip()
 ]
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "60"))
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-20b")
 HANDLED_LABEL = os.environ.get("HANDLED_LABEL", "AutoReplied")
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 
@@ -227,13 +227,35 @@ def is_buy_approval_request(subject, body):
         "Reply with EXACTLY one word: YES or NO.\n\n"
         f"Subject: {subject}\n\n{body[:2000]}"
     )
+    # NOTE: max_tokens must NOT be tiny. Reasoning models (openai/gpt-oss-*)
+    # spend the completion budget on hidden reasoning tokens FIRST, so the old
+    # max_tokens=3 came back finish_reason="length" with content="" -> every
+    # mail silently classified NO. Budget generously and cap the thinking with
+    # reasoning_effort instead (gpt-oss only; other models reject the param).
+    kwargs = {}
+    if "gpt-oss" in GROQ_MODEL:
+        kwargs["reasoning_effort"] = "low"
+
     resp = groq_client.chat.completions.create(
         model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=3,
+        max_tokens=512,
+        **kwargs,
     )
-    answer = resp.choices[0].message.content.strip().upper()
+    choice = resp.choices[0]
+    answer = (choice.message.content or "").strip().upper()
+
+    # An empty/truncated completion is a CONFIGURATION failure, not a "no".
+    # Raise so process_once aborts this poll and the message stays unlabelled
+    # and gets retried, rather than being silently skipped forever.
+    if not answer:
+        raise RuntimeError(
+            f"Groq model {GROQ_MODEL!r} returned no content "
+            f"(finish_reason={choice.finish_reason!r}, "
+            f"completion_tokens={resp.usage.completion_tokens}). "
+            "Raise max_tokens or check the model id."
+        )
     return answer.startswith("Y")
 
 
