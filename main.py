@@ -36,6 +36,7 @@ from email.utils import parsedate_to_datetime, parseaddr, getaddresses, formatad
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from groq import Groq
+from groq import BadRequestError
 
 try:
     from dotenv import load_dotenv  # local dev only; Railway injects env natively
@@ -232,17 +233,22 @@ def is_buy_approval_request(subject, body):
     # max_tokens=3 came back finish_reason="length" with content="" -> every
     # mail silently classified NO. Budget generously and cap the thinking with
     # reasoning_effort instead (gpt-oss only; other models reject the param).
-    kwargs = {}
-    if "gpt-oss" in GROQ_MODEL:
-        kwargs["reasoning_effort"] = "low"
-
-    resp = groq_client.chat.completions.create(
+    # reasoning_effort only trims cost; correctness comes from max_tokens being
+    # large enough. Older groq SDKs (<=0.13) don't have the kwarg and raise
+    # TypeError, and a non-reasoning model rejects it server-side -- neither
+    # must be allowed to kill the poll loop, so degrade to a plain call.
+    call = dict(
         model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
         max_tokens=512,
-        **kwargs,
     )
+    try:
+        resp = groq_client.chat.completions.create(
+            reasoning_effort="low", **call
+        ) if "gpt-oss" in GROQ_MODEL else groq_client.chat.completions.create(**call)
+    except (TypeError, BadRequestError):
+        resp = groq_client.chat.completions.create(**call)
     choice = resp.choices[0]
     answer = (choice.message.content or "").strip().upper()
 
