@@ -64,6 +64,22 @@ DRY_RUN = os.environ.get("DRY_RUN") == "1"
 # Exact text sent (verbatim) when an email is classified as a buy-approval request.
 APPROVAL_REPLY = os.environ.get("APPROVAL_REPLY", "Approved, please go ahead.")
 
+# Subject prefixes that ARE an approval request by definition (from an
+# allowlisted sender), so they skip the LLM. The broker's "TRADE APPROVAL-"
+# mails ask to buy, sell, or square off — the buy-only classifier said NO to
+# "square off current positions of SENSEX options" (2026-11-03). Prefix match
+# (not substring) so "RE: TRADE APPROVAL" follow-ups still go to the classifier.
+AUTO_APPROVE_SUBJECTS = [
+    s.strip().upper()
+    for s in os.environ.get("AUTO_APPROVE_SUBJECTS", "TRADE APPROVAL").split(",")
+    if s.strip()
+]
+
+
+def is_auto_approve_subject(subject):
+    s = (subject or "").strip().upper()
+    return any(s.startswith(p) for p in AUTO_APPROVE_SUBJECTS)
+
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
 
@@ -507,7 +523,7 @@ def process_once(service, handled_label_id, me_email=""):
         date_header = header(headers, "Date")
         body = extract_body(msg["payload"])
 
-        approve = is_buy_approval_request(subject, body)
+        approve = is_auto_approve_subject(subject) or is_buy_approval_request(subject, body)
 
         if not approve:
             # Not a buy-approval request: do NOT reply, leave it UNREAD so it still
